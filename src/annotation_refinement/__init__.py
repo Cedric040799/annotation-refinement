@@ -9,7 +9,7 @@ from .filters import (
     apply_osm_water_filter,
 )
 from .pipeline import refine_feature_collection
-from .osm_water import WaterMatch, load_water_polygons
+from .osm_water import WaterMatch, load_water_polygons, download_osm_water_polygons
 from .raster_metadata import PixelSize, read_pixel_size_from_geotiff
 
 __all__ = [
@@ -24,4 +24,5 @@ __all__ = [
     "read_pixel_size_from_geotiff",
     "WaterMatch",
     "load_water_polygons",
+    "download_osm_water_polygons",
 ]
