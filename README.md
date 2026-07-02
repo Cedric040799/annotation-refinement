@@ -1,178 +1,260 @@
-# Annotation refinement/postprocessing module
+# Annotation Refinement
 
-Ziel ist es, vorhergesagte Bounding Boxes aus einem Object-Detection-Modell zu prüfen, zu markieren und später gezielt zu filtern, bevor sie als neue Trainingsdaten genutzt werden.
+Ein Python-Modul zur automatisierten Nachbearbeitung von Bounding-Box-Vorhersagen aus Object-Detection-Modellen. Die Filter markieren oder entfernen fehlerhafte Vorhersagen, bevor Daten für das nächste Training verwendet werden.
 
-## Projektstruktur
+## Features
 
-```text
-annotation_refinement/
-├── README.md
-├── pyproject.toml
-├── src/
-│   └── annotation_refinement/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── filters.py
-│       ├── geojson_io.py
-│       └── pipeline.py
-└── tests/
-    └── test_confidence_filter.py
+- **Confidence-Filter**: Entfernt oder markiert Bounding Boxes mit zu niedrigem Confidence-Score
+- **Größen-Filter**: Filtert unrealistische Bounding-Box-Größen basierend auf Raster-Metadaten
+- **Aspect-Ratio-Filter**: Markiert extrem schmale oder verzerrte Bounding Boxes
+- **Duplicate-Overlap-Filter**: Entfernt redundante Erkennungen von denselben Objekten
+- **OSM-Wasser-Filter**: Filtert Bounding Boxes in Wasserflächen (basierend auf OpenStreetMap-Daten)
+
+## Installation
+
+```bash
+pip install -e .
 ```
 
-Die wichtigsten Dateien:
+oder mit `PYTHONPATH`:
 
-- `src/annotation_refinement/config.py`: zentrale Defaultwerte für Filter.
-- `src/annotation_refinement/filters.py`: einzelne Filterfunktionen.
-- `src/annotation_refinement/geojson_io.py`: GeoJSON-Dateien lesen und schreiben.
-- `src/annotation_refinement/pipeline.py`: Einstiegspunkt, der aktuell alle vorhandenen Filter nacheinander ausführt.
-- `tests/`: kleine Unit-Tests für das aktuelle Verhalten.
+```bash
+PYTHONPATH=src python3 your_script.py
+```
 
-## Funktionsweise
+## Schnellstart
 
-Die Pipeline arbeitet aktuell auf GeoJSON-`FeatureCollection`s. Erwartet wird ein GeoJSON mit Features, deren Confidence-Score in `feature["properties"]["score"]` steht.
+### Komplette Pipeline verwenden
 
-Wichtig: Schlechte Bounding Boxes werden standardmäßig nicht direkt gelöscht. Stattdessen bekommen sie unter `properties.refinement` eine Bewertung:
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import refine_feature_collection
+from annotation_refinement.geojson_io import load_geojson, write_geojson
+
+INPUT_GEOJSON = Path("data/detections.geojson")
+OUTPUT_GEOJSON = Path("data/detections_refined.geojson")
+RASTER_PATH = Path("data/Egina_PN.tif")
+OSM_WATER_GEOJSON = Path("data/water.geojson")
+
+# Eingabedateien laden
+annotations = load_geojson(INPUT_GEOJSON)
+
+# Pipeline ausführen (liest automatisch Raster-Metadaten und lädt OSM-Polygone)
+refined = refine_feature_collection(
+    annotations,
+    raster_path=RASTER_PATH,
+    osm_water_path=OSM_WATER_GEOJSON,  # optional, wird bei Bedarf heruntergeladen
+)
+
+# Ergebnis speichern
+write_geojson(refined, OUTPUT_GEOJSON)
+```
+
+### Einzelne Filter verwenden
+
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import apply_confidence_filter, RefinementConfig
+from annotation_refinement.geojson_io import load_geojson
+
+INPUT_GEOJSON = Path("data/detections.geojson")
+
+annotations = load_geojson(INPUT_GEOJSON)
+
+# Nur Confidence-Filter
+refined = apply_confidence_filter(annotations)
+
+# Mit angepassten Parametern
+config = RefinementConfig(min_confidence=0.5)
+refined = apply_confidence_filter(annotations, config)
+```
+
+Hinweis: Wenn du einzelne Filter (insbesondere Größen- oder Aspect-Ratio-Filter) einzeln verwendest, müssen die Raster-Pixelgrößen in der `RefinementConfig` gesetzt sein — siehe Abschnitt [Raster-Metadaten (GeoTIFF)](#raster-metadaten-geotiff) weiter unten.
+
+Jeder Filter kann einzeln auf vorher gefilterte Daten angewendet werden:
+
+```python
+from annotation_refinement import (
+    apply_confidence_filter,
+    apply_bbox_size_filter,
+    apply_bbox_aspect_ratio_filter,
+    apply_duplicate_overlap_filter,
+    apply_osm_water_filter,
+)
+
+# Filter nacheinander anwenden
+refined = apply_confidence_filter(annotations, config)
+refined = apply_bbox_size_filter(refined, config)
+refined = apply_bbox_aspect_ratio_filter(refined, config)
+# ... etc.
+```
+
+## Konfiguration
+
+Die `RefinementConfig`-Klasse stellt Standardwerte für alle Filter bereit. Sie können diese direkt überschreiben:
+
+```python
+from annotation_refinement import RefinementConfig
+
+config = RefinementConfig(
+    # Confidence-Filter
+    min_confidence=0.33,
+    
+    # Größen-Filter (in Metern)
+    min_bbox_side_m=1.0,
+    max_bbox_side_m=30.0,
+    min_bbox_area_m2=2.0,
+    max_bbox_area_m2=500.0,
+    
+    # Aspect-Ratio-Filter
+    max_bbox_aspect_ratio=12.0,
+    
+    # Duplicate-Overlap-Filter
+    min_duplicate_containment=0.99,
+    min_duplicate_score_delta=0.10,
+    
+    # OSM-Wasser-Filter
+    osm_water_boundary_buffer_m=8.0,
+    
+    # Ausgabe
+    drop_rejected=False,  # oder True, um abgelehnte Features zu entfernen
+)
+```
+
+## Raster-Metadaten (GeoTIFF)
+
+Die Größen- und Aspect-Ratio-Filter benötigen die Pixelgröße des Rasters in Metern. Diese wird automatisch aus GeoTIFF-Metadaten ausgelesen:
+
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import read_pixel_size_from_geotiff
+
+RASTER_PATH = Path("data/Egina_PN.tif")
+
+pixel_size = read_pixel_size_from_geotiff(RASTER_PATH)
+print(f"Pixelgröße: {pixel_size.x_m} x {pixel_size.y_m} Meter")
+```
+
+Wenn du `refine_feature_collection()` mit `raster_path` aufrufst, werden die Metadaten automatisch gelesen und die Größenfilter in echten Metern angewendet.
+
+Wenn du jedoch die Filter einzeln verwendest (also nicht die Pipeline), musst du die Pixelgröße selbst an die Filter-Config übergeben. Die folgenden Filter nutzen die Pixelgröße und werfen einen Fehler, falls sie nicht gesetzt ist:
+
+- `apply_bbox_size_filter`
+- `apply_bbox_aspect_ratio_filter`
+
+Beispiel: GeoTIFF auslesen und an einzelne Filter übergeben
+
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import (
+  read_pixel_size_from_geotiff,
+  RefinementConfig,
+  apply_bbox_size_filter,
+)
+
+RASTER_PATH = Path("data/Egina_PN.tif")
+INPUT_GEOJSON = Path("data/detections.geojson")
+
+# Pixelgröße aus GeoTIFF auslesen
+pixel = read_pixel_size_from_geotiff(RASTER_PATH)
+
+# Konfiguration mit expliziter Pixelgröße
+config = RefinementConfig(
+  pixel_size_x_m=pixel.x_m,
+  pixel_size_y_m=pixel.y_m,
+)
+
+# Einzelnen Filter anwenden
+from annotation_refinement.geojson_io import load_geojson
+annotations = load_geojson(INPUT_GEOJSON)
+refined = apply_bbox_size_filter(annotations, config)
+```
+
+Alternativ kannst du die Pixelgröße auch manuell einstellen (z. B. bei bekannten GSD-Werten), aber die zuverlässigste Methode ist das Auslesen aus dem passenden GeoTIFF mit `read_pixel_size_from_geotiff()`.
+
+## OSM-Wasser-Filter
+
+Der OSM-Wasser-Filter markiert Bounding Boxes, die in Wasserflächen liegen (als sicher falsche Positive).
+
+### Automatische OSM-Polygone
+
+Wenn du Polygone nicht selbst bereitstellst, werden sie automatisch heruntergeladen.
+
+Wenn du `osm_water_path` angibst, muss die Datei an diesem Pfad noch nicht existieren: der Pfad wird dann als Cache verwendet. Die Polygone werden bei Bedarf heruntergeladen und im angegebenen Pfad gespeichert. Bei Netzwerkproblemen wird mehrfach versucht, die Daten von verschiedenen Overpass-Endpunkten zu laden; schlägt das wiederholt fehl, wird eine Warnung ausgegeben und die Pipeline läuft ohne OSM-Filter weiter.
+
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import apply_osm_water_filter
+
+OSM_WATER_GEOJSON = Path("data/water.geojson")
+
+# Automatische Beschaffung: Polygone basierend auf der Feature-Ausdehnung
+refined = apply_osm_water_filter(annotations)
+
+# oder mit einem Cache-Pfad (wird bei Bedarf heruntergeladen)
+refined = apply_osm_water_filter(annotations, OSM_WATER_GEOJSON)
+```
+
+### Vordefinierte OSM-Polygone
+
+Wenn du eine GeoJSON-Datei mit OSM-Wasser-Polygonen hast, kannst du diese verwenden:
+
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import apply_osm_water_filter
+
+OSM_WATER_GEOJSON = Path("data/water.geojson")
+
+refined = apply_osm_water_filter(annotations, OSM_WATER_GEOJSON)
+```
+
+Or use `download_osm_water_polygons()` zum manuellen Herunterladen:
+
+```python
+from __future__ import annotations
+from pathlib import Path
+from annotation_refinement import download_osm_water_polygons
+
+OSM_WATER_GEOJSON = Path("data/water.geojson")
+
+# Download für einen bestimmten Bereich (optional)
+bbox = (10.0, 50.0, 15.0, 55.0)  # west, south, east, north
+path = download_osm_water_polygons(OSM_DOWNLOAD_PATH, bbox=bbox)
+```
+
+## Ergebnis-Format
+
+Standardmäßig werden abgelehnte Bounding Boxes **nicht gelöscht**, sondern mit Metadaten annotiert:
 
 ```json
 {
-  "refinement": {
-    "keep": false,
-    "reasons": ["low_confidence"],
-    "min_confidence": 0.33
+  "type": "Feature",
+  "geometry": {...},
+  "properties": {
+    "score": 0.85,
+    "refinement": {
+      "keep": false,
+      "reasons": ["low_confidence"],
+      "min_confidence": 0.33
+    }
   }
 }
 ```
 
-Dadurch bleiben die ursprünglichen Vorhersagen nachvollziehbar. Später können weitere Filter, Scores oder manuelle Review-Schritte darauf aufbauen.
+Mit `drop_rejected=True` werden abgelehnte Features aus der Ausgabe entfernt.
 
-Die bisher implementierten Filter sind:
+## Beispiele
 
-- Confidence-Filter: markiert Features mit fehlendem Score oder einem Score unterhalb von `min_confidence`.
-- Größenfilter: markiert Bounding Boxes, deren reale Seitenlängen oder Fläche nicht zu Straßenfahrzeugen passen.
-- Aspect-Ratio-Filter: markiert extrem schmale Bounding Boxes.
-- Duplicate-Overlap-Filter: markiert kleinere, niedriger bewertete Boxen, die fast vollständig in größeren Boxen liegen.
-
-Mit `drop_rejected=True` können abgelehnte Features stattdessen direkt aus der Ausgabe entfernt werden.
-
-## Verwendung
-
-Direkt aus dem Repository kann das Modul mit gesetztem `PYTHONPATH` genutzt werden:
-
-```bash
-PYTHONPATH=src python3 -c "from annotation_refinement import RefinementConfig; print(RefinementConfig())"
-```
-
-Ein einfaches Beispiel für eine GeoJSON-Datei:
-
-```python
-from annotation_refinement import RefinementConfig, refine_feature_collection
-from annotation_refinement.geojson_io import load_geojson, write_geojson
-
-annotations = load_geojson("data/detections.geojson")
-
-refined = refine_feature_collection(
-    annotations,
-    RefinementConfig(
-        min_confidence=0.33,
-        drop_rejected=False,
-    ),
-)
-
-write_geojson(refined, "data/detections_refined.geojson")
-```
-
-Wenn wirklich nur akzeptierte Features in der Ausgabe landen sollen:
-
-```python
-refined = refine_feature_collection(
-    annotations,
-    RefinementConfig(
-        min_confidence=0.33,
-        drop_rejected=True,
-    ),
-)
-```
-
-
-### Duplicate-Overlap-Filter
-
-Der Duplicate-Overlap-Filter sucht Fälle, in denen eine kleinere Bounding Box zu einem sehr großen Anteil in einer größeren Bounding Box liegt. Markiert wird die kleinere Box nur, wenn ihr Confidence-Score mindestens `min_duplicate_score_delta` niedriger ist als der Score der größeren Box.
-
-Das soll doppelte Vorhersagen für dasselbe Objekt entfernen, ohne normale Überlappungen in dichten Szenen zu stark zu bestrafen. Für Performance werden die Boxen in ein Pixel-Grid einsortiert, sodass nur räumlich nahe Boxen miteinander verglichen werden.
-
-```bash
-PYTHONPATH=src python3 scripts/evaluate_duplicate_overlap_thresholds.py data/detections.geojson \
-  --configs 0.90,0.05 0.95,0.05 0.95,0.10 0.98,0.05
-```
-
-Die Werte bedeuten `min_containment,min_score_delta`. Beispiel: `0.95,0.10` markiert eine kleinere Box nur dann, wenn mindestens 95% ihrer Fläche in der größeren Box liegen und ihr Score mindestens 0.10 niedriger ist.
+Siehe `test_filters.py` für ein Beispiel mit einzelnen Filtern und `pipeline_example.py` für ein Komplettbeispiel mit der Pipeline.
 
 ## Tests
 
-Die Tests laufen mit:
-
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests
-```
-
-
-
-## Notizen / Text-Mindmap
-
-```
-- Architektur:
-    - importierbares Modul
-        - jede Stufe einzeln nutzbar
-        - von außen kommen geoTifs und geo JSONs mit metadaten.
-        - intern sollten die Daten als gerenderts Arrays bzw. Pixel-Koordinaten behandelt werden.  
-    - evtl. logging
-    - die defaultwerte für die Filter sollten in einer config Datei liegen
-
-- Input: geojson mit Bounding Boxes, confidence etc. + tif Bild
-    - @Ced falls benötigt kann ich den Export der tifs und jsons ziemlich beliebig anpassen.
-    - siehe: https://github.com/OHB-DS/THEIA_Vehicle_Detection/blob/main/src/infer.py
-
-- schlechte bounding boxes nicht direkt rausschmeißen, sondern erst mal nur bewerten/sortieren
-    --> damit lässt sich später ein Bildausschnitt bewerten und ggf. entfernen
-
-- Filter-Ansätze:
-
-    - Confidence-Score:
-        --> Schwellenwert nicht klar ersichtlich, also wirklich nur sehr unsichere Vorhersagen entfernen
-        --> in Kombination mit anderen Filtern verwenden
-
-    - Größe der Bounding Box:
-        --> filtern von extrem kleinen oder extrem großen Boxen
-        --> wenn nicht einheitlich: räumliche Auflösung der Bilder einbeziehen
-        - Plan ist im Bereich GSD 5cm bis 4m zu arbeiten.
-
-    - Aspekt Ratio der Bounding Box:
-        --> filtern von extrem schmalen Boxen
-
-    - Überlappende Bounding Boxes:
-        --> filtern, wenn eine kleinere Box (nahezu) vollständig in einer größeren Box liegt + kleiner Confidence-Score
-        - Vorsicht bei dichten Szenen. Gerade Parkplätze.
-        - Behalte verschiedene Auflösungen im Kopf. Fixe Werte können dramatisch daneben liegen, wenn sich GSD ändert.
-        --> für performance: vermeiden, alle gegen alle zu vergleichen
-        - zB nearest neighbors
-    
-    - OpenStreetMap-Daten:
-        --> CRS konsistent halten
-        --> filtern von Boxen, die in Gebieten liegen, in denen die Fahrzeuge nicht sein sollten (z.B. Autos auf Wasserflächen)
-            --> zuordnung über Mittelpunkt der Bounding Box oder über Schwellenwert der Überlappung mit OSM-Polygonen
-            - OSM ist eine top Quelle. Man könnte zB auch Straßen und Parkplätze (+ margin) wohlwollender bewerten.
-            - Vorsicht bei der Präzision. Selbst bei guten EO Daten ist die Registrierung oft mehrere Meter daneben!
-
-
-- Man könnte auch Scoring statt Hard Filtering nutzen:
-    --> Also sowas wie:
-
-        final_score =
-            confidence
-            * size_factor
-            * overlap_penalty
-            * osm_penalty
-            ... (weitere Faktoren)
-    --> das kann man aber auch erst mal aufschieben, wenn hard filtering gut funktioniert
-        --> erstmal hard filtering implementieren, dann ggf. scoring einbauen
 ```

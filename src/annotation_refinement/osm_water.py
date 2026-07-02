@@ -4,8 +4,11 @@ import json
 import math
 import urllib.parse
 import urllib.request
+import urllib.error
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 Point = tuple[float, float]
@@ -49,17 +52,40 @@ def download_osm_water_polygons(
 
     query = _build_overpass_query(min_lon, min_lat, max_lon, max_lat)
     encoded_query = urllib.parse.urlencode({"data": query}).encode("utf-8")
-    request = urllib.request.Request(
-        "https://overpass-api.de/api/interpreter",
-        data=encoded_query,
-        headers={"User-Agent": "annotation-refinement/0.1"},
-    )
 
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            payload = json.load(response)
-    except Exception as exc:  # pragma: no cover - network-dependent path
-        raise RuntimeError(f"Failed to download OSM water polygons: {exc}") from exc
+    # Try a small set of Overpass instances with a simple retry/backoff strategy
+    OVERPASS_ENDPOINTS = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://lz4.overpass.openstreetmap.fr/api/interpreter",
+    ]
+
+    payload = None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        for endpoint in OVERPASS_ENDPOINTS:
+            try:
+                request = urllib.request.Request(
+                    endpoint,
+                    data=encoded_query,
+                    headers={"User-Agent": "annotation-refinement/0.1"},
+                )
+                timeout = 120 + (attempt - 1) * 30
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    payload = json.load(response)
+                break
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:  # pragma: no cover - network-dependent path
+                print(f"Overpass request failed (attempt {attempt}) at {endpoint}: {exc}")
+                # try next endpoint
+                continue
+        if payload is not None:
+            break
+        # backoff before next round of attempts
+        sleep = 2 ** attempt
+        time.sleep(sleep)
+
+    if payload is None:
+        raise RuntimeError("Failed to download OSM water polygons after multiple attempts")
 
     features = []
     for element in payload.get("elements", []):
@@ -153,6 +179,9 @@ def _overpass_element_to_geojson_geometry(element: dict[str, Any]) -> dict[str, 
     return None
 
 
+FeatureCollection = dict[str, Any]
+
+
 def load_water_polygons(path: str | Path) -> list[Polygon]:
     """Load Polygon and MultiPolygon geometries from a GeoJSON file."""
 
@@ -176,6 +205,105 @@ def load_water_polygons(path: str | Path) -> list[Polygon]:
                     polygons.append(polygon)
 
     return polygons
+
+
+def load_or_download_water_polygons(
+    osm_water_source: str | Path | list[Polygon] | None = None,
+    feature_collection: FeatureCollection | None = None,
+) -> list[Polygon]:
+    """Load water polygons from a GeoJSON file or download them when needed."""
+    try:
+        if osm_water_source is None:
+            bbox = _feature_collection_bbox(feature_collection)
+            with TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir) / "annotation_refinement_water.geojson"
+                download_osm_water_polygons(temp_path, bbox=bbox)
+                return load_water_polygons(temp_path)
+
+        if isinstance(osm_water_source, (str, Path)):
+            osm_water_path = Path(osm_water_source)
+            if not osm_water_path.exists():
+                bbox = _feature_collection_bbox(feature_collection)
+                download_osm_water_polygons(osm_water_path, bbox=bbox)
+            return load_water_polygons(osm_water_path)
+
+        return osm_water_source
+    except RuntimeError as exc:  # pragma: no cover - network-dependent path
+        print(f"Warning: could not obtain OSM water polygons: {exc}. Continuing without OSM polygons.")
+        return []
+
+
+def _feature_collection_bbox(feature_collection: FeatureCollection | None) -> tuple[float, float, float, float] | None:
+    if not feature_collection or feature_collection.get("type") != "FeatureCollection":
+        return None
+
+    min_lon = math.inf
+    min_lat = math.inf
+    max_lon = -math.inf
+    max_lat = -math.inf
+
+    for feature in feature_collection.get("features", []):
+        geometry = feature.get("geometry")
+        if geometry is None:
+            continue
+        min_lon, min_lat, max_lon, max_lat = _expand_bbox_from_geometry(
+            geometry, min_lon, min_lat, max_lon, max_lat
+        )
+
+    if min_lon == math.inf:
+        return None
+
+    return min_lon, min_lat, max_lon, max_lat
+
+
+def _expand_bbox_from_geometry(
+    geometry: dict[str, Any],
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+) -> tuple[float, float, float, float]:
+    geometry_type = geometry.get("type")
+    if geometry_type == "GeometryCollection":
+        for sub_geometry in geometry.get("geometries", []):
+            min_lon, min_lat, max_lon, max_lat = _expand_bbox_from_geometry(
+                sub_geometry, min_lon, min_lat, max_lon, max_lat
+            )
+        return min_lon, min_lat, max_lon, max_lat
+
+    coordinates = geometry.get("coordinates")
+    if coordinates is None:
+        return min_lon, min_lat, max_lon, max_lat
+
+    return _expand_bbox_from_coordinates(coordinates, min_lon, min_lat, max_lon, max_lat)
+
+
+def _expand_bbox_from_coordinates(
+    coordinates: Any,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+) -> tuple[float, float, float, float]:
+    if not coordinates:
+        return min_lon, min_lat, max_lon, max_lat
+
+    if isinstance(coordinates[0], (int, float)):
+        lon = float(coordinates[0])
+        lat = float(coordinates[1])
+        return (
+            min(min_lon, lon),
+            min(min_lat, lat),
+            max(max_lon, lon),
+            max(max_lat, lat),
+        )
+
+    for coordinate in coordinates:
+        min_lon, min_lat, max_lon, max_lat = _expand_bbox_from_coordinates(
+            coordinate, min_lon, min_lat, max_lon, max_lat
+        )
+
+    return min_lon, min_lat, max_lon, max_lat
 
 
 def match_points_in_water(

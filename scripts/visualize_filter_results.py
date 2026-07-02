@@ -23,6 +23,13 @@ from annotation_refinement import (
 )
 from annotation_refinement.geojson_io import load_geojson
 
+"""
+Example usage:
+
+PYTHONPATH=src python3 scripts/visualize_filter_results.py data/detections.geojson data/Egina_PN.tif --crop 23.42240 37.74234 23.43040 37.75034
+
+This will create a filter.png file at data/visualizations/filter.png with the filtered detections overlaid on the GeoTIFF image.
+"""
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

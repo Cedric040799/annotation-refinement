@@ -7,6 +7,8 @@ from .filters import (
     apply_confidence_filter,
     apply_duplicate_overlap_filter,
     apply_osm_water_filter,
+    count_refinement_results,
+    drop_rejected_features,
 )
 from .pipeline import refine_feature_collection
 from .osm_water import WaterMatch, load_water_polygons, download_osm_water_polygons
@@ -19,6 +21,8 @@ __all__ = [
     "apply_confidence_filter",
     "apply_duplicate_overlap_filter",
     "apply_osm_water_filter",
+    "count_refinement_results",
+    "drop_rejected_features",
     "refine_feature_collection",
     "PixelSize",
     "read_pixel_size_from_geotiff",

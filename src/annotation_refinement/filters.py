@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from .config import RefinementConfig
-from .osm_water import Polygon, WaterMatch, match_points_in_water
+from .osm_water import Polygon, WaterMatch, load_or_download_water_polygons, match_points_in_water
 
 Feature = dict[str, Any]
 FeatureCollection = dict[str, Any]
@@ -126,15 +127,22 @@ def apply_duplicate_overlap_filter(
 
 def apply_osm_water_filter(
     feature_collection: FeatureCollection,
-    water_polygons: list[Polygon],
+    osm_water_source: str | Path | list[Polygon] | None = None,
     config: RefinementConfig | None = None,
 ) -> FeatureCollection:
-    """Mark boxes that are safely inside OSM water polygons."""
+    """Mark boxes that are safely inside OSM water polygons.
+
+    If `osm_water_source` is a path, the file is loaded or downloaded as needed.
+    If it is a list of polygons, those polygons are used directly.
+    If it is None, polygons are automatically downloaded for the feature extents.
+    """
 
     config = config or RefinementConfig()
     refined = deepcopy(feature_collection)
     features = refined.get("features", [])
     kept_features: list[Feature] = []
+
+    water_polygons = load_or_download_water_polygons(osm_water_source, feature_collection)
 
     for feature in features:
         refined_feature = _annotate_osm_water(feature, water_polygons, config)
@@ -142,6 +150,44 @@ def apply_osm_water_filter(
 
         if keep or not config.drop_rejected:
             kept_features.append(refined_feature)
+
+    refined["features"] = kept_features
+    return refined
+
+
+def count_refinement_results(feature_collection: FeatureCollection) -> dict[str, int]:
+    """Count total, kept and rejected features from a refined feature collection."""
+
+    features = feature_collection.get("features", []) or []
+    total = len(features)
+    kept = 0
+    rejected = 0
+
+    for feature in features:
+        keep = feature.get("properties", {}).get("refinement", {}).get("keep", True)
+        if keep is False:
+            rejected += 1
+        else:
+            kept += 1
+
+    return {
+        "total": total,
+        "kept": kept,
+        "rejected": rejected,
+    }
+
+
+def drop_rejected_features(feature_collection: FeatureCollection) -> FeatureCollection:
+    """Return a copy of the feature collection without rejected features."""
+
+    refined = deepcopy(feature_collection)
+    features = refined.get("features", []) or []
+    kept_features: list[Feature] = []
+
+    for feature in features:
+        keep = feature.get("properties", {}).get("refinement", {}).get("keep", True)
+        if keep is not False:
+            kept_features.append(feature)
 
     refined["features"] = kept_features
     return refined

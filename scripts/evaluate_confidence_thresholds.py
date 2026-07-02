@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
-
+"""
+import sys
+sys.path.append(r"/home/csu/annotation_refinement/src")
+"""
+ 
 from annotation_refinement.geojson_io import load_geojson
+from annotation_refinement import apply_confidence_filter, RefinementConfig
 
 """
 Example usage + output:
@@ -49,10 +54,13 @@ def main() -> None:
     print()
     print(f"{'threshold':>10} {'rejected':>10} {'rejected_%':>11} {'kept':>10} {'kept_%':>8}")
 
-    scores = [feature.get("properties", {}).get("score") for feature in features]
-
     for threshold in args.thresholds:
-        rejected = sum(score is None or float(score) < threshold for score in scores)
+        config = RefinementConfig(min_confidence=threshold, drop_rejected=False)
+        refined = apply_confidence_filter(feature_collection, config)
+        rejected = sum(
+            not feature.get("properties", {}).get("refinement", {}).get("keep", True)
+            for feature in refined.get("features", [])
+        )
         kept = total - rejected
         rejected_percent = rejected / total * 100
         kept_percent = kept / total * 100

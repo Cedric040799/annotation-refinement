@@ -76,15 +76,16 @@ def main() -> None:
     args = parse_args()
     feature_collection = load_geojson(args.geojson)
     
-    # Determine water polygons path
+    # Determine water polygons source (file path or automatic download).
     if args.water_geojson:
-        water_geojson_path = args.water_geojson
+        water_source = args.water_geojson
+        water_polygons = load_water_polygons(water_source)
     else:
-        # Auto-download if not provided
+        # Auto-download to the provided output path if not provided.
         bbox = _bbox_from_feature_collection(feature_collection)
         water_geojson_path = download_osm_water_polygons(args.water_output, bbox=bbox)
-    
-    water_polygons = load_water_polygons(water_geojson_path)
+        water_source = water_geojson_path
+        water_polygons = load_water_polygons(water_geojson_path)
     total = len(feature_collection.get("features", []))
 
     if total == 0:
@@ -102,7 +103,10 @@ def main() -> None:
             osm_water_boundary_buffer_m=buffer_m,
             drop_rejected=False,
         )
-        refined = apply_osm_water_filter(feature_collection, water_polygons, config)
+        # Use the package-level OSM filter. Pass the path (or list) so the
+        # filter can load or download as needed. Here we pass the resolved
+        # `water_source` (a path) so the filter will use the cached file.
+        refined = apply_osm_water_filter(feature_collection, osm_water_source=water_source, config=config)
         rejected = sum(
             not feature["properties"].get("refinement", {}).get("keep", True)
             for feature in refined.get("features", [])
